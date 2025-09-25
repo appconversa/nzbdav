@@ -1,6 +1,7 @@
 using NzbWebDAV.Clients.Connections;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Streams;
+using Serilog;
 using Usenet.Exceptions;
 using Usenet.Nntp.Responses;
 using Usenet.Nzb;
@@ -10,6 +11,8 @@ namespace NzbWebDAV.Clients;
 
 public class MultiConnectionNntpClient(ConnectionPool<INntpClient> connectionPool) : INntpClient
 {
+    private static readonly TimeSpan ConnectionReadyTimeout = TimeSpan.FromSeconds(30);
+
     private ConnectionPool<INntpClient> _connectionPool = connectionPool;
 
     public Task<bool> ConnectAsync(string host, int port, bool useSsl, CancellationToken cancellationToken)
@@ -64,12 +67,7 @@ public class MultiConnectionNntpClient(ConnectionPool<INntpClient> connectionPoo
         {
             var result = await task(connectionLock.Connection);
 
-            // we only want to release the connection-lock once the underlying connection is ready again.
-            // ReSharper disable once MethodSupportsCancellation
-            // we intentionally do not pass the cancellation token to ContinueWith,
-            // since we want the continuation to always run.
-            _ = connectionLock.Connection.WaitForReady(CancellationToken.None)
-                .ContinueWith(_ => connectionLock.Dispose());
+            ScheduleReadinessRelease(connectionLock, cancellationToken);
             return result;
         }
         catch (NntpException e)
@@ -117,5 +115,55 @@ public class MultiConnectionNntpClient(ConnectionPool<INntpClient> connectionPoo
     {
         _connectionPool.Dispose();
         GC.SuppressFinalize(this);
+    }
+
+    private static void ScheduleReadinessRelease(
+        ConnectionLock<INntpClient> connectionLock,
+        CancellationToken cancellationToken)
+    {
+        var readinessCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        readinessCts.CancelAfter(ConnectionReadyTimeout);
+
+        Task readinessTask;
+        try
+        {
+            readinessTask = connectionLock.Connection.WaitForReady(readinessCts.Token);
+        }
+        catch (Exception ex)
+        {
+            readinessCts.Dispose();
+            Log.Warning(
+                ex,
+                "Failed to await NNTP connection readiness; replacing hung connection.");
+            connectionLock.Replace();
+            connectionLock.Dispose();
+            return;
+        }
+
+        _ = readinessTask.ContinueWith(
+            t =>
+            {
+                readinessCts.Dispose();
+
+                if (t.IsCanceled)
+                {
+                    Log.Warning(
+                        "NNTP connection readiness wait cancelled or timed out after {Timeout}; replacing hung connection.",
+                        ConnectionReadyTimeout);
+                    connectionLock.Replace();
+                }
+                else if (t.IsFaulted)
+                {
+                    Log.Warning(
+                        t.Exception?.GetBaseException(),
+                        "NNTP connection readiness wait faulted; replacing hung connection.");
+                    connectionLock.Replace();
+                }
+
+                connectionLock.Dispose();
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 }
