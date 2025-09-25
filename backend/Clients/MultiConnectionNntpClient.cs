@@ -1,4 +1,5 @@
-﻿using NzbWebDAV.Clients.Connections;
+using NzbWebDAV.Clients.Connections;
+using NzbWebDAV.Extensions;
 using NzbWebDAV.Streams;
 using Usenet.Exceptions;
 using Usenet.Nntp.Responses;
@@ -83,10 +84,24 @@ public class MultiConnectionNntpClient(ConnectionPool<INntpClient> connectionPoo
 
             throw;
         }
-        catch (Exception e)
+        catch (OperationCanceledException)
         {
-            // we also want to release the connection-lock if there was any error getting the result.
             connectionLock.Dispose();
+            throw;
+        }
+        catch (Exception e) when (e.IsNonRetryableDownloadException())
+        {
+            connectionLock.Dispose();
+            throw;
+        }
+        catch (Exception)
+        {
+            connectionLock.Replace();
+            connectionLock.Dispose();
+
+            if (retries > 0)
+                return await RunWithConnection(task, cancellationToken, retries - 1);
+
             throw;
         }
     }
