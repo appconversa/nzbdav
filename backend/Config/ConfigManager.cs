@@ -1,4 +1,6 @@
-﻿using Microsoft.EntityFrameworkCore;
+using System.Linq;
+using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Utils;
@@ -44,7 +46,7 @@ public class ConfigManager
             OnConfigChanged?.Invoke(this, new ConfigEventArgs
             {
                 ChangedConfig = configItems.ToDictionary(x => x.ConfigName, x => x.ConfigValue),
-                NewConfig = _config
+                NewConfig = new Dictionary<string, string>(_config),
             });
         }
     }
@@ -69,12 +71,19 @@ public class ConfigManager
                ?? "audio,software,tv,movies";
     }
 
+    public IReadOnlyList<UsenetProviderConfig> GetUsenetProviders()
+    {
+        lock (_config)
+        {
+            return ParseUsenetProviders(_config);
+        }
+    }
+
     public int GetMaxConnections()
     {
-        return int.Parse(
-            StringUtil.EmptyToNull(GetConfigValue("usenet.connections"))
-            ?? "10"
-        );
+        var providers = GetUsenetProviders();
+        var maxConnections = providers.Sum(provider => Math.Max(provider.Connections, 0));
+        return maxConnections > 0 ? maxConnections : 1;
     }
 
     public int GetConnectionsPerStream()
@@ -139,5 +148,147 @@ public class ConfigManager
     {
         public Dictionary<string, string> ChangedConfig { get; set; } = new();
         public Dictionary<string, string> NewConfig { get; set; } = new();
+    }
+
+    private static IReadOnlyList<UsenetProviderConfig> ParseUsenetProviders(IReadOnlyDictionary<string, string> source)
+    {
+        var providers = new List<UsenetProviderConfig>();
+
+        if (source.TryGetValue("usenet.providers", out var rawProviders) &&
+            !string.IsNullOrWhiteSpace(rawProviders))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(rawProviders);
+                if (document.RootElement.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var element in document.RootElement.EnumerateArray())
+                    {
+                        var provider = BuildProviderFromJsonElement(element);
+                        if (provider != null)
+                        {
+                            providers.Add(provider);
+                        }
+                    }
+                }
+            }
+            catch (JsonException)
+            {
+                // ignore malformed JSON and fall back to legacy configuration keys
+            }
+        }
+
+        if (providers.Count > 0)
+        {
+            return providers;
+        }
+
+        return new[]
+        {
+            BuildLegacyProvider(source)
+        };
+    }
+
+    private static UsenetProviderConfig BuildLegacyProvider(IReadOnlyDictionary<string, string> source)
+    {
+        var host = source.GetValueOrDefault("usenet.host") ?? string.Empty;
+        var port = ParseInt(source.GetValueOrDefault("usenet.port"), 119);
+        var useSsl = ParseBool(source.GetValueOrDefault("usenet.use-ssl"));
+        var user = source.GetValueOrDefault("usenet.user") ?? string.Empty;
+        var pass = source.GetValueOrDefault("usenet.pass") ?? string.Empty;
+        var connections = Math.Max(ParseInt(source.GetValueOrDefault("usenet.connections"), 10), 1);
+        var name = !string.IsNullOrWhiteSpace(host) ? "Primary" : "Provider 1";
+
+        return new UsenetProviderConfig(name, host, port, useSsl, user, pass, connections);
+    }
+
+    private static UsenetProviderConfig? BuildProviderFromJsonElement(JsonElement element)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        string GetString(string propertyName)
+        {
+            if (!element.TryGetProperty(propertyName, out var value))
+            {
+                return string.Empty;
+            }
+
+            return value.ValueKind switch
+            {
+                JsonValueKind.String => value.GetString() ?? string.Empty,
+                JsonValueKind.Number => value.GetRawText(),
+                JsonValueKind.True => "true",
+                JsonValueKind.False => "false",
+                _ => string.Empty
+            };
+        }
+
+        int ParseElementInt(string propertyName, int defaultValue)
+        {
+            if (!element.TryGetProperty(propertyName, out var value))
+            {
+                return defaultValue;
+            }
+
+            if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var number))
+            {
+                return number;
+            }
+
+            if (value.ValueKind == JsonValueKind.String &&
+                int.TryParse(value.GetString(), out var parsed))
+            {
+                return parsed;
+            }
+
+            return defaultValue;
+        }
+
+        bool ParseElementBool(string propertyName)
+        {
+            if (!element.TryGetProperty(propertyName, out var value))
+            {
+                return false;
+            }
+
+            return value.ValueKind switch
+            {
+                JsonValueKind.True => true,
+                JsonValueKind.False => false,
+                JsonValueKind.String when bool.TryParse(value.GetString(), out var parsed) => parsed,
+                _ => false
+            };
+        }
+
+        var name = GetString("name");
+        var host = GetString("host");
+        var port = ParseElementInt("port", 119);
+        var useSsl = ParseElementBool("useSsl");
+        var user = GetString("user");
+        var pass = GetString("pass");
+        var connections = Math.Max(ParseElementInt("connections", 10), 1);
+
+        return new UsenetProviderConfig(
+            string.IsNullOrWhiteSpace(name) ? "Provider" : name,
+            host,
+            port,
+            useSsl,
+            user,
+            pass,
+            connections
+        );
+    }
+
+    private static int ParseInt(string? value, int defaultValue)
+    {
+        return int.TryParse(value, out var parsed) ? parsed : defaultValue;
+    }
+
+    private static bool ParseBool(string? value)
+    {
+        return bool.TryParse(value, out var parsed) && parsed;
     }
 }

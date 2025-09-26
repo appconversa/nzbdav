@@ -18,6 +18,7 @@ const defaultConfig = {
     "usenet.port": "",
     "usenet.use-ssl": "false",
     "usenet.connections": "",
+    "usenet.providers": "[]",
     "usenet.connections-per-stream": "",
     "usenet.user": "",
     "usenet.pass": "",

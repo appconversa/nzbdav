@@ -19,17 +19,8 @@ public class UsenetStreamingClient
         // initialize private members
         _websocketManager = websocketManager;
 
-        // get connection settings from config-manager
-        var host = configManager.GetConfigValue("usenet.host") ?? string.Empty;
-        var port = int.Parse(configManager.GetConfigValue("usenet.port") ?? "119");
-        var useSsl = bool.Parse(configManager.GetConfigValue("usenet.use-ssl") ?? "false");
-        var user = configManager.GetConfigValue("usenet.user") ?? string.Empty;
-        var pass = configManager.GetConfigValue("usenet.pass") ?? string.Empty;
-        var connections = configManager.GetMaxConnections();
-
         // initialize the nntp-client
-        var createNewConnection = (CancellationToken ct) => CreateNewConnection(host, port, useSsl, user, pass, ct);
-        var connectionPool = CreateNewConnectionPool(connections, createNewConnection);
+        var connectionPool = BuildConnectionPool(configManager.GetUsenetProviders());
         var multiConnectionClient = new MultiConnectionNntpClient(connectionPool);
         var cache = new MemoryCache(new MemoryCacheOptions() { SizeLimit = 8192 });
         _client = new CachingNntpClient(multiConnectionClient, cache);
@@ -43,17 +34,11 @@ public class UsenetStreamingClient
                 !configEventArgs.ChangedConfig.ContainsKey("usenet.use-ssl") &&
                 !configEventArgs.ChangedConfig.ContainsKey("usenet.user") &&
                 !configEventArgs.ChangedConfig.ContainsKey("usenet.pass") &&
-                !configEventArgs.ChangedConfig.ContainsKey("usenet.connections")) return;
+                !configEventArgs.ChangedConfig.ContainsKey("usenet.connections") &&
+                !configEventArgs.ChangedConfig.ContainsKey("usenet.providers")) return;
 
-            // update the connection-pool according to the new config
-            var connectionCount = int.Parse(configEventArgs.NewConfig["usenet.connections"]);
-            var newHost = configEventArgs.NewConfig["usenet.host"];
-            var newPort = int.Parse(configEventArgs.NewConfig["usenet.port"]);
-            var newUseSsl = bool.Parse(configEventArgs.NewConfig.GetValueOrDefault("usenet.use-ssl", "false"));
-            var newUser = configEventArgs.NewConfig["usenet.user"];
-            var newPass = configEventArgs.NewConfig["usenet.pass"];
-            var newConnectionPool = CreateNewConnectionPool(connectionCount, cancellationToken =>
-                CreateNewConnection(newHost, newPort, newUseSsl, newUser, newPass, cancellationToken));
+            var providers = configManager.GetUsenetProviders();
+            var newConnectionPool = BuildConnectionPool(providers);
             multiConnectionClient.UpdateConnectionPool(newConnectionPool);
         };
     }
@@ -121,6 +106,13 @@ public class UsenetStreamingClient
     {
         var message = $"{args.Live}|{args.Max}|{args.Idle}";
         _websocketManager.SendMessage(WebsocketTopic.UsenetConnections, message);
+    }
+
+    private ConnectionPool<INntpClient> BuildConnectionPool(IReadOnlyList<UsenetProviderConfig> providers)
+    {
+        var allocator = new UsenetProviderConnectionAllocator(providers);
+        var maxConnections = Math.Max(allocator.TotalConnections, 1);
+        return CreateNewConnectionPool(maxConnections, allocator.CreateConnectionAsync);
     }
 
     public static async ValueTask<INntpClient> CreateNewConnection
