@@ -1,10 +1,46 @@
+
 .container {
-    max-width:400px;
+    max-width: 540px;
     margin-bottom: 25px;
 }
 
 .form-group {
     margin-bottom: 12px;
+}
+
+.providersContainer {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.providerCard {
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    padding: 16px;
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.providerHeader {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: flex-start;
+}
+
+.removeProviderButton {
+    align-self: center;
+    margin-top: 30px;
+}
+
+.addProviderButton {
+    margin-top: 12px;
+    margin-bottom: 12px;
+}
+
+.connectionsSummary {
+    margin-bottom: 12px;
+    font-style: italic;
 }
 
 .justify-right{
