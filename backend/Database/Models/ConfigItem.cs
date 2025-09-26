@@ -11,6 +11,7 @@ public class ConfigItem
         "usenet.port",
         "usenet.use-ssl",
         "usenet.connections",
+        "usenet.providers",
         "usenet.user",
         "usenet.pass",
         "webdav.user",
